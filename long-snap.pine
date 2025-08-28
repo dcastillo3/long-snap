@@ -446,8 +446,31 @@ srRejected := false
 
 
 
+
+// --- Session Gating: Only allow entries between 6PM ET Sunday and 4PM ET Friday, close all at 4PM ET ---
+// Pine Script uses UTC. 6PM ET = 23:00 UTC, 4PM ET = 21:00 UTC (approx, not handling DST here)
+// TradingView's 'timestamp' and 'hour', 'minute', 'dayofweek' are in exchange time, so use 'hour' and 'dayofweek'.
+
+// Helper: is it between 6PM ET (23:00 UTC) and 4PM ET (21:00 UTC) for the day?
+withinDailySession = (hour >= 18 or hour < 16)
+
+// Helper: is it between Sunday 6PM ET and Friday 4PM ET?
+// Pine Script dayofweek: Sunday=1, Monday=2, ..., Friday=6, Saturday=7
+isSessionOpen = (dayofweek == dayofweek.sunday and hour >= 18) or (dayofweek > dayofweek.sunday and dayofweek < dayofweek.friday) or (dayofweek == dayofweek.friday and hour < 16)
+
+// Helper: is it the daily close bar (4PM ET)?
+isDailyCloseBar = (hour == 16 and minute == 0)
+
+// --- Force close all trades at 4PM ET (daily close) ---
+if isDailyCloseBar
+    strategy.close_all(comment="Daily Close 4PM ET")
+
+// Only show yellow when the candidate hasn't been decided yet on this bar
+candidatePending = (wvfCandidateLong or wvfCandidateShort) and not (tradeAccepted or tradeRejected)
+
 // --- Candidate and gating logic for long ---
-isCandidateLong = wvfCandidateLong
+// Only allow new entries if session is open
+isCandidateLong = wvfCandidateLong and isSessionOpen
 dmiOkLongActive = dmiOkLong
 rsiOkLongActive = rsiOkLong
 
@@ -499,7 +522,8 @@ if tradeDirection == "Long" and isCandidateLong
     pendingLong := false
 
 // --- Candidate and gating logic for short ---
-isCandidateShort = wvfCandidateShort
+// Only allow new entries if session is open
+isCandidateShort = wvfCandidateShort and isSessionOpen
 dmiOkShortActive = dmiOkShort
 rsiOkShortActive = rsiOkShort
 
@@ -550,33 +574,17 @@ if tradeDirection == "Short" and isCandidateShort
     sessionBarShort := na
     pendingShort := false
 
-// Only show yellow when the candidate hasn't been decided yet on this bar
-candidatePending = (wvfCandidateLong or wvfCandidateShort) and not (tradeAccepted or tradeRejected)
-
-
 
 // --- Debugging Markers: Long (belowbar) and Short (abovebar) ---
-
-// WVF Spike
 plotshape(tradeDirection == "Long" and showWvfSpike and spikeBarLong, title="WVF Spike Long (red)", style=shape.circle, location=location.belowbar, color=color.red, size=size.tiny)
 plotshape(tradeDirection == "Short" and showWvfSpike and spikeBarShort, title="WVF Spike Short (red)", style=shape.circle, location=location.abovebar, color=color.red, size=size.tiny)
-
-// Simple Entry
 plotshape(tradeDirection == "Long" and showSimpleEntry and simpleEntryBarLong, title="Simple Entry Long (orange)", style=shape.triangledown, location=location.belowbar, color=color.orange, size=size.tiny)
 plotshape(tradeDirection == "Short" and showSimpleEntry and simpleEntryBarShort, title="Simple Entry Short (orange)", style=shape.triangleup, location=location.abovebar, color=color.orange, size=size.tiny)
-
-// WVF Candidate
 plotshape(tradeDirection == "Long" and showWvfCandidate and wvfCandidateLong, title="WVF Candidate Long (yellow)", style=shape.square, location=location.belowbar, color=color.yellow, size=size.tiny)
 plotshape(tradeDirection == "Short" and showWvfCandidate and wvfCandidateShort, title="WVF Candidate Short (yellow)", style=shape.square, location=location.abovebar, color=color.yellow, size=size.tiny)
-
-// Accepted trade markers
 plotshape(tradeDirection == "Long" and showAcceptedTrades and tradeAccepted and isCandidateLong, title="Accepted Long (filters OK)", style=shape.square, location=location.belowbar, color=color.lime, size=size.tiny)
 plotshape(tradeDirection == "Short" and showAcceptedTrades and tradeAccepted and isCandidateShort, title="Accepted Short (filters OK)", style=shape.square, location=location.abovebar, color=color.lime, size=size.tiny)
-
-// Rejected trade markers
 plotshape(tradeDirection == "Long" and showRejectedTrades and tradeRejected and isCandidateLong, title="Rejected Long (filters/sizing)", style=shape.cross, location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny)
 plotshape(tradeDirection == "Short" and showRejectedTrades and tradeRejected and isCandidateShort, title="Rejected Short (filters/sizing)", style=shape.cross, location=location.abovebar, color=color.new(color.blue, 0), size=size.tiny)
-
-// S&R rejected markers
 plotshape(tradeDirection == "Long" and showSrRejected and srRejected and isCandidateLong, title="Rejected Long (S&R score)", style=shape.xcross, location=location.belowbar, color=color.new(color.orange, 0), size=size.small)
 plotshape(tradeDirection == "Short" and showSrRejected and srRejected and isCandidateShort, title="Rejected Short (S&R score)", style=shape.xcross, location=location.abovebar, color=color.new(color.aqua, 0), size=size.small)

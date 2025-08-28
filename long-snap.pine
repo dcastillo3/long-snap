@@ -1,5 +1,10 @@
 //@version=6
-strategy("Long Snap", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, process_orders_on_close=true)
+
+// === Trade Direction Option ===
+tradeDirGroup = "Trade Direction"
+tradeDirection = input.string("Long", "Trade Direction", options=["Long", "Short"], group=tradeDirGroup)
+
+strategy("Long/Short Snap", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, process_orders_on_close=true)
 
 // =================== WVF Settings ===================
 wvfGroup = "WVF Settings"
@@ -11,6 +16,8 @@ percentileFactor = input.float(0.85, "Percentile Factor", group=wvfGroup)
 
 triggerWindow = input.int(60, "Trigger Window (bars)", group=wvfGroup)
 bodyBuffer = input.int(0, "Body Clearance Buffer (ticks)", minval=0, maxval=5, group=wvfGroup)
+
+showSessionLine = input.bool(true, "Show Session Line (Orange=Long, Blue=Short)", group=wvfGroup)
 
 // =================== DMI / ADX Filters ===================
 dmiGroup = "DMI / ADX Filters"
@@ -73,102 +80,161 @@ showAcceptedTrades = input.bool(true, "Accepted Trade Markers", group=visualGrou
 showRejectedTrades = input.bool(false, "Rejected Trade Markers", group=visualGroup)
 showSrRejected = input.bool(true, "S&R Rejected Markers", group=visualGroup)
 
-visualLinesGroup = "Visual Helper Lines"
-showSessionLines = input.bool(true, "Orange Session High Lines", group=visualLinesGroup)
 
-// =================== WVF math (bottom spikes) ===================
-highestClose = ta.highest(close, wvfLength)
-wvf = (highestClose - low) / math.max(highestClose, 1e-10) * 100.0
-standardDev = bollingerMultiplier * ta.stdev(wvf, bollingerLength)
-bollingerMid = ta.sma(wvf, bollingerLength)
-bollingerUpper = bollingerMid + standardDev
-percentileHigh = ta.highest(wvf, percentileLength) * percentileFactor
+// =================== WVF math (direction-aware) ===================
+// For long: use lows-based WVF (classic Vix Fix)
+highestCloseLong = ta.highest(close, wvfLength)
+wvfLong = (highestCloseLong - low) / math.max(highestCloseLong, 1e-10) * 100.0
+standardDevLong = bollingerMultiplier * ta.stdev(wvfLong, bollingerLength)
+bollingerMidLong = ta.sma(wvfLong, bollingerLength)
+bollingerUpperLong = bollingerMidLong + standardDevLong
+percentileHighLong = ta.highest(wvfLong, percentileLength) * percentileFactor
 
-// WVF red/orange
-spikeBar       = (wvf >= bollingerUpper) or (wvf >= percentileHigh)
-simpleEntryBar = ((wvf[1] >= bollingerUpper[1]) or (wvf[1] >= percentileHigh[1])) and (wvf < bollingerUpper and wvf < percentileHigh)
+// For short: use highs-based WVF (euphoria spikes)
+lowestCloseShort = ta.lowest(close, wvfLength)
+wvfShort = ((lowestCloseShort - high) / math.max(lowestCloseShort, 1e-10)) * 100.0
+standardDevShort = bollingerMultiplier * ta.stdev(wvfShort, bollingerLength)
+bollingerMidShort = ta.sma(wvfShort, bollingerLength)
+bollingerLowerShort = bollingerMidShort - standardDevShort
+percentileLowShort = ta.lowest(wvfShort, percentileLength) * percentileFactor
 
-// =================== DMI Calculations ===================
+// WVF spike and simple entry logic, direction-aware
+spikeBarLong = (wvfLong >= bollingerUpperLong) or (wvfLong >= percentileHighLong)
+simpleEntryBarLong = ((wvfLong[1] >= bollingerUpperLong[1]) or (wvfLong[1] >= percentileHighLong[1])) and (wvfLong < bollingerUpperLong and wvfLong < percentileHighLong)
+
+spikeBarShort = (wvfShort <= bollingerLowerShort) or (wvfShort <= percentileLowShort)
+simpleEntryBarShort = ((wvfShort[1] <= bollingerLowerShort[1]) or (wvfShort[1] <= percentileLowShort[1])) and (wvfShort > bollingerLowerShort and wvfShort > percentileLowShort)
+
+// Unified direction-aware variables for use in session/candidate logic
+spikeBar = tradeDirection == "Long" ? spikeBarLong : spikeBarShort
+simpleEntryBar = tradeDirection == "Long" ? simpleEntryBarLong : simpleEntryBarShort
+
+// =================== DMI Calculations (directional) ===================
 [plusDi, minusDi, adx] = ta.dmi(dmiLength, adxSmoothing)
 adxRising = ta.rising(adx, adxRiseLength)
+adxFalling = ta.falling(adx, adxRiseLength)
 
-plusDiOk  = (not requirePlusDI) or (plusDi > minusDi)
-adxOk   = (not requireAdxRising) or adxRising
-dmiThresholdsOk = (not useDmiThresholds) or ((plusDi >= plusDiThreshold) and (adx >= adxThreshold) and (minusDi <= minusDiThreshold))
-dmiOk = plusDiOk and adxOk and dmiThresholdsOk
+// DMI/ADX logic: invert for shorts
+plusDiOkLong  = (not requirePlusDI) or (plusDi > minusDi)
+plusDiOkShort = (not requirePlusDI) or (minusDi > plusDi)
+adxOkLong   = (not requireAdxRising) or adxRising
+adxOkShort  = (not requireAdxRising) or adxFalling
+dmiThresholdsOkLong = (not useDmiThresholds) or ((plusDi >= plusDiThreshold) and (adx >= adxThreshold) and (minusDi <= minusDiThreshold))
+dmiThresholdsOkShort = (not useDmiThresholds) or ((minusDi >= plusDiThreshold) and (adx >= adxThreshold) and (plusDi <= minusDiThreshold))
+dmiOkLong = plusDiOkLong and adxOkLong and dmiThresholdsOkLong
+dmiOkShort = plusDiOkShort and adxOkShort and dmiThresholdsOkShort
 
-// =================== RSI Calculations ===================
+// =================== RSI Calculations (directional) ===================
 rsi = ta.rsi(close, rsiLength)
 rsiSma = ta.sma(rsi, rsiSmaLength)
-rsiCrossover = ta.crossover(rsi, rsiSma)
-barsSinceCross = ta.barssince(rsiCrossover)
-recentCross = barsSinceCross <= rsiCrossLookback
+rsiCrossUp = ta.crossover(rsi, rsiSma)
+rsiCrossDown = ta.crossunder(rsi, rsiSma)
+barsSinceCrossUp = ta.barssince(rsiCrossUp)
+barsSinceCrossDown = ta.barssince(rsiCrossDown)
+recentCrossUp = barsSinceCrossUp <= rsiCrossLookback
+recentCrossDown = barsSinceCrossDown <= rsiCrossLookback
 
+// Long zones (original)
 aboveUpper = rsi >= rsiUpperLevel
-midToUpper = ((rsi >= rsiMidLevel) and (rsi < rsiUpperLevel)) or (recentCross and (rsi < rsiUpperLevel))
+midToUpper = ((rsi >= rsiMidLevel) and (rsi < rsiUpperLevel)) or (recentCrossUp and (rsi < rsiUpperLevel))
 belowLower = rsi <= rsiLowerLevel
 lowerToMid = (rsi > rsiLowerLevel) and (rsi < rsiMidLevel)
 
-rsiZoneOk = (allowRsiUpper and aboveUpper) or (allowRsiMidToUpper and midToUpper) or (allowRsiLower and belowLower) or (allowRsiLowerToMid and lowerToMid)
-rsiOk = (not useRsi) or rsiZoneOk
+// Short zones (mirrored)
+belowLowerShort = rsi <= rsiLowerLevel
+midToLowerShort = ((rsi > rsiLowerLevel) and (rsi <= rsiMidLevel)) or (recentCrossDown and (rsi > rsiLowerLevel))
+aboveUpperShort = rsi >= rsiUpperLevel
+upperToMidShort = (rsi < rsiUpperLevel) and (rsi >= rsiMidLevel)
 
-// Track the active "orange" session
-var float sessionClose = na
-var float sessionLow   = na
-var float sessionHigh  = na
-var int   sessionBar   = na
-var bool  pending  = false
+// Zone gating for long/short
+rsiZoneOkLong = (allowRsiUpper and aboveUpper) or (allowRsiMidToUpper and midToUpper) or (allowRsiLower and belowLower) or (allowRsiLowerToMid and lowerToMid)
+rsiZoneOkShort = (allowRsiLower and belowLowerShort) or (allowRsiLowerToMid and midToLowerShort) or (allowRsiUpper and aboveUpperShort) or (allowRsiMidToUpper and upperToMidShort)
+rsiOkLong = (not useRsi) or rsiZoneOkLong
+rsiOkShort = (not useRsi) or rsiZoneOkShort
 
-// Line objects for session visualization
-var line sessionHighLine = na
 
-if simpleEntryBar
-    // Terminate any existing session lines at current bar (preserve their history)
-    if pending and showSessionLines
-        if not na(sessionHighLine)
-            line.set_x2(sessionHighLine, bar_index - 1)  // Terminate at previous bar
-    
-    // Reset session tracking
-    if pending
-        pending := false
-    
-    // Start new session
-    sessionClose := close
-    sessionLow   := low
-    sessionHigh  := high     // include orange wick
-    sessionBar   := bar_index
-    pending  := true
-    
-    // Create new session line (new instance, don't reuse old one)
-    if showSessionLines
-        sessionHighLine := line.new(bar_index, sessionHigh, bar_index, sessionHigh, color=color.orange, width=2, style=line.style_solid)
+// === Session and trigger logic for both long and short ===
+var float sessionCloseLong = na
+var float sessionLowLong   = na
+var float sessionHighLong  = na
+var int   sessionBarLong   = na
+var bool  pendingLong  = false
+var line sessionHighLineLong = na
 
-// Candidate: first NON-spike bar whose BODY-HIGH clears orange high within window
-tick         = syminfo.mintick
+var float sessionCloseShort = na
+var float sessionLowShort   = na
+var float sessionHighShort  = na
+var int   sessionBarShort   = na
+var bool  pendingShort  = false
+var line sessionLowLineShort = na
+
+// --- Long session logic (original) ---
+if tradeDirection == "Long" and simpleEntryBarLong
+    if pendingLong and showSessionLine
+        if not na(sessionHighLineLong)
+            line.set_x2(sessionHighLineLong, bar_index - 1)
+    if pendingLong
+        pendingLong := false
+    sessionCloseLong := close
+    sessionLowLong   := low
+    sessionHighLong  := high
+    sessionBarLong   := bar_index
+    pendingLong  := true
+    if showSessionLine
+        sessionHighLineLong := line.new(bar_index, sessionHighLong, bar_index, sessionHighLong, color=color.orange, width=2, style=line.style_solid)
+
+tick = syminfo.mintick
 bodyBufferTicks = bodyBuffer * tick
-barsSinceEntry = na(sessionBar) ? 10e6 : bar_index - sessionBar
-bodyHigh     = math.max(open, close)
-wvfCandidate = pending and (not spikeBar) and (barsSinceEntry >= 1) and (barsSinceEntry <= triggerWindow) and (bodyHigh > sessionHigh + bodyBufferTicks)
+barsSinceEntryLong = na(sessionBarLong) ? 10e6 : bar_index - sessionBarLong
+bodyHigh = math.max(open, close)
+wvfCandidateLong = pendingLong and (not spikeBarLong) and (barsSinceEntryLong >= 1) and (barsSinceEntryLong <= triggerWindow) and (bodyHigh > sessionHighLong + bodyBufferTicks)
 
-// Reset pending when session expires or is triggered
-if pending and (barsSinceEntry > triggerWindow or wvfCandidate)
-    if barsSinceEntry > triggerWindow
-        // Session expired without trigger - terminate lines at current endpoint
-        if showSessionLines
-            if not na(sessionHighLine)
-                line.set_x2(sessionHighLine, bar_index)  // Finalize at current bar
-        
-        // Reset session tracking
-        sessionClose := na
-        sessionLow := na
-        sessionHigh := na
-        sessionBar := na
-        pending := false
+if tradeDirection == "Long" and pendingLong and (barsSinceEntryLong > triggerWindow or wvfCandidateLong)
+    if barsSinceEntryLong > triggerWindow
+        if showSessionLine
+            if not na(sessionHighLineLong)
+                line.set_x2(sessionHighLineLong, bar_index)
+        sessionCloseLong := na
+        sessionLowLong := na
+        sessionHighLong := na
+        sessionBarLong := na
+        pendingLong := false
+if tradeDirection == "Long" and pendingLong and showSessionLine
+    if not na(sessionHighLineLong)
+        line.set_x2(sessionHighLineLong, bar_index)
 
-// Extend session lines while active
-if pending and showSessionLines
-    if not na(sessionHighLine)
-        line.set_x2(sessionHighLine, bar_index)
+// --- Short session logic (mirrored) ---
+if tradeDirection == "Short" and simpleEntryBarShort
+    if pendingShort and showSessionLine
+        if not na(sessionLowLineShort)
+            line.set_x2(sessionLowLineShort, bar_index - 1)
+    if pendingShort
+        pendingShort := false
+    sessionCloseShort := close
+    sessionLowShort   := low
+    sessionHighShort  := high
+    sessionBarShort   := bar_index
+    pendingShort  := true
+    if showSessionLine
+        sessionLowLineShort := line.new(bar_index, sessionLowShort, bar_index, sessionLowShort, color=color.aqua, width=2, style=line.style_solid)
+
+barsSinceEntryShort = na(sessionBarShort) ? 10e6 : bar_index - sessionBarShort
+bodyLow = math.min(open, close)
+wvfCandidateShort = pendingShort and (not spikeBarShort) and (barsSinceEntryShort >= 1) and (barsSinceEntryShort <= triggerWindow) and (bodyLow < sessionLowShort - bodyBufferTicks)
+
+if tradeDirection == "Short" and pendingShort and (barsSinceEntryShort > triggerWindow or wvfCandidateShort)
+    if barsSinceEntryShort > triggerWindow
+        if showSessionLine
+            if not na(sessionLowLineShort)
+                line.set_x2(sessionLowLineShort, bar_index)
+        sessionCloseShort := na
+        sessionLowShort := na
+        sessionHighShort := na
+        sessionBarShort := na
+        pendingShort := false
+if tradeDirection == "Short" and pendingShort and showSessionLine
+    if not na(sessionLowLineShort)
+        line.set_x2(sessionLowLineShort, bar_index)
 
 // User Defined Types for S&R (matching LuxAlgo structure)
 type SnR
@@ -266,71 +332,108 @@ if supportZones.size() > 0 and useSr
             lastSupport.bx.set_right(bar_index)
 
 // Function to calculate S&R score for current price
+
 calcSrScore(currentPrice, stopPrice, takeProfitPrice) =>
     score = 50.0  // Base score
-    
     if not useSr
         score
     else
-        // Check proximity to resistance zones (negative impact)
-        resistanceImpact = 0.0
-        if resistanceZones.size() > 0
-            for i = 0 to resistanceZones.size() - 1
-                zone = array.get(resistanceZones, i)
-                if not na(zone.bx)
-                    resTop = box.get_top(zone.bx)
-                    resBottom = box.get_bottom(zone.bx)
-                    
-                    // If current price or take profit is near/in resistance zone
-                    if currentPrice >= resBottom and currentPrice <= resTop
-                        resistanceImpact += -30.0  // Heavy penalty for being in resistance
-                    else if takeProfitPrice >= resBottom and takeProfitPrice <= resTop
-                        resistanceImpact += -20.0  // Penalty if TP hits resistance
-                    else if currentPrice > resBottom * 0.99 and currentPrice < resTop * 1.01
-                        resistanceImpact += -10.0  // Light penalty for being close
-        
-        // Check proximity to support zones (positive impact)
-        supportImpact = 0.0
-        if supportZones.size() > 0
-            for i = 0 to supportZones.size() - 1
-                zone = array.get(supportZones, i)
-                if not na(zone.bx)
-                    supTop = box.get_top(zone.bx)
-                    supBottom = box.get_bottom(zone.bx)
-                    
-                    // If current price is in or near support zone
-                    if currentPrice >= supBottom and currentPrice <= supTop
-                        supportImpact += 20.0  // Bonus for being in support
-                    else if currentPrice > supBottom * 0.99 and currentPrice < supTop * 1.01
-                        supportImpact += 10.0  // Light bonus for being close
-        
-        // Calculate headroom to next resistance
-        headroomBonus = 0.0
-        var float nextResistance = na
-        if resistanceZones.size() > 0
-            for i = 0 to resistanceZones.size() - 1
-                zone = array.get(resistanceZones, i)
-                if not na(zone.bx)
-                    resBottom = box.get_bottom(zone.bx)
-                    if resBottom > currentPrice
-                        if na(nextResistance) or resBottom < nextResistance
-                            nextResistance := resBottom
-        
-        if not na(nextResistance)
-            distanceToRes = nextResistance - currentPrice
-            tradeRange = takeProfitPrice - currentPrice
-            if tradeRange > 0
-                headroomRatio = distanceToRes / tradeRange
-                if headroomRatio > 2.0
-                    headroomBonus := 15.0  // Good headroom
-                else if headroomRatio > 1.5
-                    headroomBonus := 10.0  // Decent headroom
-                else if headroomRatio < 1.0
-                    headroomBonus := -15.0  // Insufficient headroom
-        
-        // Combine all factors
+        var float resistanceImpact = 0.0
+        var float supportImpact = 0.0
+        var float headroomBonus = 0.0
+        // Directional S&R logic
+        if tradeDirection == "Long"
+            // --- Long logic (original) ---
+            if resistanceZones.size() > 0
+                for i = 0 to resistanceZones.size() - 1
+                    zone = array.get(resistanceZones, i)
+                    if not na(zone.bx)
+                        resTop = box.get_top(zone.bx)
+                        resBottom = box.get_bottom(zone.bx)
+                        if currentPrice >= resBottom and currentPrice <= resTop
+                            resistanceImpact += -30.0
+                        else if takeProfitPrice >= resBottom and takeProfitPrice <= resTop
+                            resistanceImpact += -20.0
+                        else if currentPrice > resBottom * 0.99 and currentPrice < resTop * 1.01
+                            resistanceImpact += -10.0
+            if supportZones.size() > 0
+                for i = 0 to supportZones.size() - 1
+                    zone = array.get(supportZones, i)
+                    if not na(zone.bx)
+                        supTop = box.get_top(zone.bx)
+                        supBottom = box.get_bottom(zone.bx)
+                        if currentPrice >= supBottom and currentPrice <= supTop
+                            supportImpact += 20.0
+                        else if currentPrice > supBottom * 0.99 and currentPrice < supTop * 1.01
+                            supportImpact += 10.0
+            // Headroom to next resistance above
+            var float nextResistance = na
+            if resistanceZones.size() > 0
+                for i = 0 to resistanceZones.size() - 1
+                    zone = array.get(resistanceZones, i)
+                    if not na(zone.bx)
+                        resBottom = box.get_bottom(zone.bx)
+                        if resBottom > currentPrice
+                            if na(nextResistance) or resBottom < nextResistance
+                                nextResistance := resBottom
+            if not na(nextResistance)
+                distanceToRes = nextResistance - currentPrice
+                tradeRange = takeProfitPrice - currentPrice
+                if tradeRange > 0
+                    headroomRatio = distanceToRes / tradeRange
+                    if headroomRatio > 2.0
+                        headroomBonus := 15.0
+                    else if headroomRatio > 1.5
+                        headroomBonus := 10.0
+                    else if headroomRatio < 1.0
+                        headroomBonus := -15.0
+        else
+            // --- Short logic (mirrored) ---
+            if supportZones.size() > 0
+                for i = 0 to supportZones.size() - 1
+                    zone = array.get(supportZones, i)
+                    if not na(zone.bx)
+                        supTop = box.get_top(zone.bx)
+                        supBottom = box.get_bottom(zone.bx)
+                        if currentPrice >= supBottom and currentPrice <= supTop
+                            supportImpact += -30.0  // Penalty for being in support (now negative)
+                        else if takeProfitPrice >= supBottom and takeProfitPrice <= supTop
+                            supportImpact += -20.0  // Penalty if TP hits support
+                        else if currentPrice > supBottom * 0.99 and currentPrice < supTop * 1.01
+                            supportImpact += -10.0  // Penalty for being close
+            if resistanceZones.size() > 0
+                for i = 0 to resistanceZones.size() - 1
+                    zone = array.get(resistanceZones, i)
+                    if not na(zone.bx)
+                        resTop = box.get_top(zone.bx)
+                        resBottom = box.get_bottom(zone.bx)
+                        if currentPrice >= resBottom and currentPrice <= resTop
+                            resistanceImpact += 20.0  // Bonus for being in resistance
+                        else if currentPrice > resBottom * 0.99 and currentPrice < resTop * 1.01
+                            resistanceImpact += 10.0  // Bonus for being close
+            // Headroom to next support below
+            var float nextSupport = na
+            if supportZones.size() > 0
+                for i = 0 to supportZones.size() - 1
+                    zone = array.get(supportZones, i)
+                    if not na(zone.bx)
+                        supTop = box.get_top(zone.bx)
+                        if supTop < currentPrice
+                            if na(nextSupport) or supTop > nextSupport
+                                nextSupport := supTop
+            if not na(nextSupport)
+                distanceToSup = currentPrice - nextSupport
+                tradeRange = currentPrice - takeProfitPrice
+                if tradeRange > 0
+                    headroomRatio = distanceToSup / tradeRange
+                    if headroomRatio > 2.0
+                        headroomBonus := 15.0
+                    else if headroomRatio > 1.5
+                        headroomBonus := 10.0
+                    else if headroomRatio < 1.0
+                        headroomBonus := -15.0
         finalScore = score + resistanceImpact + supportImpact + headroomBonus
-        math.max(0.0, math.min(100.0, finalScore))  // Clamp between 0-100
+        math.max(0.0, math.min(100.0, finalScore))
 
 // =================== Accept / Reset logic (with optional max-loss sizing) ===================
 var bool tradeAccepted  = false
@@ -340,22 +443,29 @@ tradeAccepted := false
 tradeRejected := false
 srRejected := false
 
-isCandidate = wvfCandidate
 
-if isCandidate
-    if dmiOk and rsiOk
-        // Build stop from orange low + buffer
-        baseStop = na(sessionLow) ? low : sessionLow
-        stopPrice = baseStop - stopBuffer * tick
-        riskPoints = close - stopPrice
-        takeProfitPrice = close + riskReward * riskPoints
-        // Calculate S&R score
-        srScore = calcSrScore(close, stopPrice, takeProfitPrice)
-        srGateOk = (not useSr) or (srScore >= srScoreThreshold)
-        // Declare orderQty variable
+
+// --- Candidate and gating logic for long ---
+isCandidateLong = wvfCandidateLong
+dmiOkLongActive = dmiOkLong
+rsiOkLongActive = rsiOkLong
+
+if tradeDirection == "Long" and isCandidateLong
+    if dmiOkLongActive and rsiOkLongActive
         orderQty = 0.0
+        var float stopPrice = na
+        var float takeProfitPrice = na
+        var float riskPoints = na
+        var float baseStop = na
+        var float baseTake = na
+        var float srScore = na
+        baseStop := na(sessionLowLong) ? low : sessionLowLong
+        stopPrice := baseStop - stopBuffer * tick
+        riskPoints := close - stopPrice
+        takeProfitPrice := close + riskReward * riskPoints
+        srScore := calcSrScore(close, stopPrice, takeProfitPrice)
+        srGateOk = (not useSr) or (srScore >= srScoreThreshold)
         if srGateOk
-            // ---- sizing ----
             orderQty := fixedQty
             if useRiskSizing
                 riskCash = riskPoints * syminfo.pointvalue
@@ -367,40 +477,105 @@ if isCandidate
                 strategy.entry("Long", strategy.long, qty=orderQty)
                 strategy.exit("TP/SL", "Long", stop=stopPrice, limit=takeProfitPrice)
                 tradeAccepted := true
-                // Show S&R score on accepted trades
                 if useSr
                     label.new(bar_index, low - atr * 0.5, "S&R Score: " + str.tostring(math.round(srScore)) + "%", style=label.style_label_up, textcolor=color.white, color=srScore >= 70 ? color.green : srScore >= 50 ? color.yellow : color.orange, size=size.tiny)
-                // --- ALERT ---
                 alertMessage = "Long Snap ENTRY | Qty: " + str.tostring(orderQty) + ", TP: " + str.tostring(takeProfitPrice) + ", SL: " + str.tostring(stopPrice) + ", RR: " + str.tostring(riskReward)
                 alert(alertMessage, alert.freq_once_per_bar_close)
             else
                 tradeRejected := true
         else
-            // Rejected due to S&R score
             srRejected := true
             tradeRejected := true
     else
         tradeRejected := true
-    
-    // Reset session after trade evaluation (whether accepted or rejected)
-    // Terminate session lines at current bar (preserve their history)
-    if showSessionLines
-        if not na(sessionHighLine)
-            line.set_x2(sessionHighLine, bar_index)  // Finalize at current bar
-    
-    // Reset session tracking
-    sessionClose := na
-    sessionLow := na
-    sessionHigh := na
-    sessionBar := na
-    pending := false
+    if showSessionLine
+        if not na(sessionHighLineLong)
+            line.set_x2(sessionHighLineLong, bar_index)
+    sessionCloseLong := na
+    sessionLowLong := na
+    sessionHighLong := na
+    sessionBarLong := na
+    pendingLong := false
+
+// --- Candidate and gating logic for short ---
+isCandidateShort = wvfCandidateShort
+dmiOkShortActive = dmiOkShort
+rsiOkShortActive = rsiOkShort
+
+if tradeDirection == "Short" and isCandidateShort
+    if dmiOkShortActive and rsiOkShortActive
+        orderQty = 0.0
+        var float stopPrice = na
+        var float takeProfitPrice = na
+        var float riskPoints = na
+        var float baseStop = na
+        var float baseTake = na
+        var float srScore = na
+        baseStop := na(sessionHighShort) ? high : sessionHighShort
+        stopPrice := baseStop + stopBuffer * tick
+        riskPoints := stopPrice - close
+        takeProfitPrice := close - riskReward * riskPoints
+        srScore := calcSrScore(close, stopPrice, takeProfitPrice)
+        srGateOk = (not useSr) or (srScore >= srScoreThreshold)
+        if srGateOk
+            orderQty := fixedQty
+            if useRiskSizing
+                riskCash = riskPoints * syminfo.pointvalue
+                canSize = riskCash > 0
+                sized = canSize ? (maxLossAmount / riskCash) : 0.0
+                orderQty := roundQty ? math.floor(sized) : sized
+                orderQty := math.min(orderQty, maxContracts)
+            if (orderQty > 0) and (riskPoints > 0)
+                strategy.entry("Short", strategy.short, qty=orderQty)
+                strategy.exit("TP/SL", "Short", stop=stopPrice, limit=takeProfitPrice)
+                tradeAccepted := true
+                if useSr
+                    label.new(bar_index, high + atr * 0.5, "S&R Score: " + str.tostring(math.round(srScore)) + "%", style=label.style_label_down, textcolor=color.white, color=srScore >= 70 ? color.green : srScore >= 50 ? color.yellow : color.orange, size=size.tiny)
+                alertMessage = "Short Snap ENTRY | Qty: " + str.tostring(orderQty) + ", TP: " + str.tostring(takeProfitPrice) + ", SL: " + str.tostring(stopPrice) + ", RR: " + str.tostring(riskReward)
+                alert(alertMessage, alert.freq_once_per_bar_close)
+            else
+                tradeRejected := true
+        else
+            srRejected := true
+            tradeRejected := true
+    else
+        tradeRejected := true
+    if showSessionLine
+        if not na(sessionLowLineShort)
+            line.set_x2(sessionLowLineShort, bar_index)
+    sessionCloseShort := na
+    sessionLowShort := na
+    sessionHighShort := na
+    sessionBarShort := na
+    pendingShort := false
 
 // Only show yellow when the candidate hasn't been decided yet on this bar
-candidatePending = wvfCandidate and not (tradeAccepted or tradeRejected)
+candidatePending = (wvfCandidateLong or wvfCandidateShort) and not (tradeAccepted or tradeRejected)
 
-plotshape(showWvfSpike and spikeBar, title="WVF Spike (red)", style=shape.circle, location=location.belowbar, color=color.red, size=size.tiny)
-plotshape(showSimpleEntry and simpleEntryBar, title="Simple Entry (orange)", style=shape.triangledown, location=location.belowbar, color=color.orange, size=size.tiny)
-plotshape(showWvfCandidate and wvfCandidate, title="WVF Candidate (yellow)", style=shape.square, location=location.belowbar, color=color.yellow, size=size.tiny)
-plotshape(showAcceptedTrades and tradeAccepted, title="Accepted (filters OK)", style=shape.square, location=location.belowbar, color=color.lime, size=size.tiny)
-plotshape(showRejectedTrades and tradeRejected, title="Rejected (filters/sizing)", style=shape.cross, location=location.top, color=color.new(color.purple, 0), size=size.tiny)
-plotshape(showSrRejected and srRejected, title="Rejected (S&R score)", style=shape.xcross, location=location.top, color=color.new(color.orange, 0), size=size.small)
+
+
+// --- Debugging Markers: Long (belowbar) and Short (abovebar) ---
+
+// WVF Spike
+plotshape(tradeDirection == "Long" and showWvfSpike and spikeBarLong, title="WVF Spike Long (red)", style=shape.circle, location=location.belowbar, color=color.red, size=size.tiny)
+plotshape(tradeDirection == "Short" and showWvfSpike and spikeBarShort, title="WVF Spike Short (red)", style=shape.circle, location=location.abovebar, color=color.red, size=size.tiny)
+
+// Simple Entry
+plotshape(tradeDirection == "Long" and showSimpleEntry and simpleEntryBarLong, title="Simple Entry Long (orange)", style=shape.triangledown, location=location.belowbar, color=color.orange, size=size.tiny)
+plotshape(tradeDirection == "Short" and showSimpleEntry and simpleEntryBarShort, title="Simple Entry Short (orange)", style=shape.triangleup, location=location.abovebar, color=color.orange, size=size.tiny)
+
+// WVF Candidate
+plotshape(tradeDirection == "Long" and showWvfCandidate and wvfCandidateLong, title="WVF Candidate Long (yellow)", style=shape.square, location=location.belowbar, color=color.yellow, size=size.tiny)
+plotshape(tradeDirection == "Short" and showWvfCandidate and wvfCandidateShort, title="WVF Candidate Short (yellow)", style=shape.square, location=location.abovebar, color=color.yellow, size=size.tiny)
+
+// Accepted trade markers
+plotshape(tradeDirection == "Long" and showAcceptedTrades and tradeAccepted and isCandidateLong, title="Accepted Long (filters OK)", style=shape.square, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(tradeDirection == "Short" and showAcceptedTrades and tradeAccepted and isCandidateShort, title="Accepted Short (filters OK)", style=shape.square, location=location.abovebar, color=color.lime, size=size.tiny)
+
+// Rejected trade markers
+plotshape(tradeDirection == "Long" and showRejectedTrades and tradeRejected and isCandidateLong, title="Rejected Long (filters/sizing)", style=shape.cross, location=location.belowbar, color=color.new(color.purple, 0), size=size.tiny)
+plotshape(tradeDirection == "Short" and showRejectedTrades and tradeRejected and isCandidateShort, title="Rejected Short (filters/sizing)", style=shape.cross, location=location.abovebar, color=color.new(color.blue, 0), size=size.tiny)
+
+// S&R rejected markers
+plotshape(tradeDirection == "Long" and showSrRejected and srRejected and isCandidateLong, title="Rejected Long (S&R score)", style=shape.xcross, location=location.belowbar, color=color.new(color.orange, 0), size=size.small)
+plotshape(tradeDirection == "Short" and showSrRejected and srRejected and isCandidateShort, title="Rejected Short (S&R score)", style=shape.xcross, location=location.abovebar, color=color.new(color.aqua, 0), size=size.small)

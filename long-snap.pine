@@ -1,8 +1,8 @@
 //@version=6
 
-// === Trade Direction Option ===
+
 tradeDirGroup = "Trade Direction"
-tradeDirection = input.string("Long", "Trade Direction", options=["Long", "Short"], group=tradeDirGroup)
+tradeDirection = input.string("Long", "Trade Direction (Long or Short)", options=["Long", "Short"], group=tradeDirGroup)
 
 strategy("Long/Short Snap", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10, pyramiding=0, process_orders_on_close=true)
 
@@ -12,19 +12,20 @@ wvfLength = input.int(22, "WVF Lookback Period", group=wvfGroup)
 bollingerLength = input.int(20, "Bollinger Length", group=wvfGroup)
 bollingerMultiplier = input.float(2.0, "Bollinger Multiplier", step=0.1, group=wvfGroup)
 percentileLength = input.int(50, "Percentile Lookback Period", group=wvfGroup)
+showSessionLine = input.bool(true, "Show Session High/Low Line (Long/Short)", group=wvfGroup)
 percentileFactor = input.float(0.85, "Percentile Factor", group=wvfGroup)
 
 triggerWindow = input.int(60, "Trigger Window (bars)", group=wvfGroup)
 bodyBuffer = input.int(0, "Body Clearance Buffer (ticks)", minval=0, maxval=5, group=wvfGroup)
 
-showSessionLine = input.bool(true, "Show Session Line (Orange=Long, Blue=Short)", group=wvfGroup)
+
 
 // =================== DMI / ADX Filters ===================
 dmiGroup = "DMI / ADX Filters"
 dmiLength = input.int(14, "DMI Length", group=dmiGroup)
 adxSmoothing = input.int(14, "ADX Smoothing", group=dmiGroup)
-requirePlusDI = input.bool(true, "Require +DI > -DI", group=dmiGroup)
-requireAdxRising = input.bool(true, "Require ADX Rising", group=dmiGroup)
+requireDirectionalDI = input.bool(true, "Require Directional DI (trend direction)", group=dmiGroup)
+requireDirectionalAdx = input.bool(true, "Require Directional ADX (trend direction)", group=dmiGroup)
 adxRiseLength = input.int(3, "ADX Rising Lookback", minval=1, maxval=20, group=dmiGroup)
 
 useDmiThresholds = input.bool(true, "Enable Level Thresholds", group=dmiGroup)
@@ -55,18 +56,18 @@ srMargin = input.float(2.0, "S&R Zone Margin", minval=0.1, maxval=10.0, step=0.1
 srScoreThreshold = input.float(50.0, "Minimum S&R Score", minval=0, maxval=100, step=1, group=srGroup)
 showSrZones = input.bool(true, "Show S&R Zones", group=srGroup)
 
-// S&R Zone color inputs (user customizable)
+
 supportColor = input.color(color.new(#089981, 83), "Support Zone Color", group=srGroup)
 resistanceColor = input.color(color.new(#f23645, 83), "Resistance Zone Color", group=srGroup)
 
-// =================== Orders ===================
+
 orderGroup = "Orders"
-fixedQty = input.float(1, "Fixed Quantity", step=0.1, group=orderGroup)
+fixedQty = input.float(1, "Fixed Trade Quantity", step=0.1, group=orderGroup)
+useRiskSizing = input.bool(false, "Enable Risk-Based Position Sizing", group=orderGroup)
 stopBuffer = input.int(1, "Stop Buffer (ticks)", group=orderGroup)
 riskReward = input.float(3.0, "Risk/Reward Ratio", step=0.5, group=orderGroup)
 
 // ---- Optional max-loss sizing ----
-useRiskSizing = input.bool(false, "Enable Risk-Based Sizing", group=orderGroup)
 maxLossAmount = input.float(530, "Max Loss Per Trade ($)", step=1, group=orderGroup)
 maxContracts = input.float(6, "Max Contracts Cap", step=1, group=orderGroup)
 roundQty = input.bool(true, "Round to Whole Contracts", group=orderGroup)
@@ -115,10 +116,10 @@ adxRising = ta.rising(adx, adxRiseLength)
 adxFalling = ta.falling(adx, adxRiseLength)
 
 // DMI/ADX logic: invert for shorts
-plusDiOkLong  = (not requirePlusDI) or (plusDi > minusDi)
-plusDiOkShort = (not requirePlusDI) or (minusDi > plusDi)
-adxOkLong   = (not requireAdxRising) or adxRising
-adxOkShort  = (not requireAdxRising) or adxFalling
+plusDiOkLong  = (not requireDirectionalDI) or (plusDi > minusDi)
+plusDiOkShort = (not requireDirectionalDI) or (minusDi > plusDi)
+adxOkLong   = (not requireDirectionalAdx) or adxRising
+adxOkShort  = (not requireDirectionalAdx) or adxFalling
 dmiThresholdsOkLong = (not useDmiThresholds) or ((plusDi >= plusDiThreshold) and (adx >= adxThreshold) and (minusDi <= minusDiThreshold))
 dmiThresholdsOkShort = (not useDmiThresholds) or ((minusDi >= plusDiThreshold) and (adx >= adxThreshold) and (plusDi <= minusDiThreshold))
 dmiOkLong = plusDiOkLong and adxOkLong and dmiThresholdsOkLong
